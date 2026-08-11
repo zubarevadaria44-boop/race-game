@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { TRACK_LIST } from '@/lib/track';
 
 const COLORS = [
   { name: 'Red', value: 'red' },
@@ -11,20 +10,15 @@ const COLORS = [
   { name: 'Yellow', value: 'yellow' },
 ];
 
-function generateRoomCode() {
-  const code = Math.floor(1000 + Math.random() * 9000);
-  return code.toString();
-}
+export const ARENA_ROOM = 'arena';
 
 export default function HomePage() {
   const router = useRouter();
   const [playerName, setPlayerName] = useState('');
   const [color, setColor] = useState('red');
-  const [joinCode, setJoinCode] = useState('');
-  const [trackId, setTrackId] = useState(TRACK_LIST[0].id);
   const [collisions, setCollisions] = useState(true);
 
-  function goToRoom(roomId) {
+  function handlePlay() {
     if (!playerName.trim()) {
       alert('Enter your name!');
       return;
@@ -32,22 +26,9 @@ export default function HomePage() {
     const params = new URLSearchParams({
       name: playerName,
       color,
-      track: trackId,
       collisions: collisions ? '1' : '0',
     });
-    router.push(`/race/${roomId}?${params.toString()}`);
-  }
-
-  function handleCreate() {
-    goToRoom(generateRoomCode());
-  }
-
-  function handleJoin() {
-    if (!joinCode.trim()) {
-      alert('Enter a room code!');
-      return;
-    }
-    goToRoom(joinCode.trim());
+    router.push(`/race/${ARENA_ROOM}?${params.toString()}`);
   }
 
   return (
@@ -64,7 +45,10 @@ export default function HomePage() {
         padding: '2rem',
       }}
     >
-      <h1 style={{ fontSize: '2rem' }}>🏎️ Race Game</h1>
+      <h1 style={{ fontSize: '2rem', margin: 0 }}>🏎️ Rocket Arena</h1>
+      <p style={{ margin: 0, opacity: 0.7, textAlign: 'center', maxWidth: 360 }}>
+        3-minute rounds · 3 lives · grab rockets, shields &amp; spread shots
+      </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '320px' }}>
         <label>Name</label>
@@ -98,49 +82,23 @@ export default function HomePage() {
         </div>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '320px' }}>
-        <label>Select track</label>
-        <select
-          value={trackId}
-          onChange={(e) => setTrackId(e.target.value)}
-          style={{ padding: '0.5rem', fontSize: '1rem' }}
-        >
-          {TRACK_LIST.map((track) => (
-            <option key={track.id} value={track.id}>
-              {track.name}
-            </option>
-          ))}
-        </select>
-      </div>
-
       <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', width: '320px', cursor: 'pointer' }}>
-        <input
-          type="checkbox"
-          checked={collisions}
-          onChange={(e) => setCollisions(e.target.checked)}
-        />
-        Car collisions (block opponents)
+        <input type="checkbox" checked={collisions} onChange={(e) => setCollisions(e.target.checked)} />
+        Car collisions
       </label>
 
       <button
-        onClick={handleCreate}
-        style={{ padding: '0.75rem 1.5rem', fontSize: '1rem', width: '320px', cursor: 'pointer' }}
+        onClick={handlePlay}
+        style={{
+          padding: '0.85rem 1.5rem',
+          fontSize: '1.1rem',
+          width: '320px',
+          cursor: 'pointer',
+          fontWeight: 'bold',
+        }}
       >
-        Create room
+        Play
       </button>
-
-      <div style={{ display: 'flex', gap: '0.5rem', width: '320px' }}>
-        <input
-          type="text"
-          value={joinCode}
-          onChange={(e) => setJoinCode(e.target.value)}
-          placeholder="Room code"
-          style={{ padding: '0.5rem', fontSize: '1rem', flex: 1 }}
-        />
-        <button onClick={handleJoin} style={{ padding: '0.5rem 1rem', cursor: 'pointer' }}>
-          Join
-        </button>
-      </div>
     </div>
   );
 }

@@ -19,14 +19,23 @@ import {
   ROCKET_HIT_RADIUS,
   PICKUP_RESPAWN,
   MAX_ROCKETS,
+  MAX_LIVES,
+  MAX_SHIELDS,
   BOOST_DURATION,
   BOOST_MULTIPLIER,
+  INVINCIBLE_MS,
+  getRoundEndTime,
+  getRoundTimeLeft,
   resolveCarCollision,
   isStunned,
+  isInvincible,
   applyStun,
   createRocket,
+  createSpreadRockets,
   updateRocket,
   createExplosion,
+  createDefaultCar,
+  respawnCar,
 } from '@/lib/gameplay';
 
 function upsertOther(othersRef, data) {
@@ -41,19 +50,28 @@ function upsertOther(othersRef, data) {
     color: data.color,
     name: data.name,
     score: data.score ?? existing?.score ?? 0,
+    lives: data.lives ?? existing?.lives ?? MAX_LIVES,
+    shields: data.shields ?? existing?.shields ?? 0,
     stunnedUntil: data.stunnedUntil ?? existing?.stunnedUntil ?? 0,
+    eliminated: data.eliminated ?? false,
   };
 }
 
-export default function RaceRoom({ roomId }) {
+function formatTime(ms) {
+  const sec = Math.ceil(ms / 1000);
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+export default function RaceRoom() {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const searchParams = useSearchParams();
   const playerColor = searchParams.get('color') || 'red';
   const playerName = searchParams.get('name') || 'Player';
-  const trackId = searchParams.get('track') || 'forest';
   const collisionsEnabled = searchParams.get('collisions') !== '0';
-  const trackName = getTrack(trackId).name;
+  const track = getTrack();
 
   const playerIdRef = useRef(null);
   if (playerIdRef.current === null && typeof window !== 'undefined') {
@@ -65,14 +83,14 @@ export default function RaceRoom({ roomId }) {
     playerIdRef.current = id;
   }
 
-  const carRef = useRef(null);
-  if (!carRef.current) {
-    const start = getTrack(trackId).start;
-    carRef.current = { x: start.x, y: start.y, angle: start.angle, speed: 0, stunnedUntil: 0, boostedUntil: 0 };
-  }
-
+  const carRef = useRef(createDefaultCar(track.start));
   const keysRef = useRef({});
-  const raceRef = useRef({ nextCheckpoint: 1, laps: 0, score: 0, startTime: performance.now() });
+  const raceRef = useRef({
+    nextCheckpoint: 1,
+    laps: 0,
+    score: 0,
+    roundEnd: getRoundEndTime(),
+  });
   const othersRef = useRef({});
   const connectedRef = useRef(false);
   const viewSizeRef = useRef({ width: 1200, height: 720 });
@@ -83,31 +101,30 @@ export default function RaceRoom({ roomId }) {
   const spacePressedRef = useRef(false);
 
   const [displayScore, setDisplayScore] = useState(0);
-  const [displayLaps, setDisplayLaps] = useState(0);
-  const [displayTime, setDisplayTime] = useState(0);
+  const [displayLives, setDisplayLives] = useState(MAX_LIVES);
+  const [displayShields, setDisplayShields] = useState(0);
+  const [displayRoundTime, setDisplayRoundTime] = useState(formatTime(getRoundTimeLeft()));
   const [displayRockets, setDisplayRockets] = useState(0);
   const [playerCount, setPlayerCount] = useState(1);
   const [connectionStatus, setConnectionStatus] = useState('connecting');
+  const [roundMessage, setRoundMessage] = useState('');
 
   useEffect(() => {
-    const track = getTrack(trackId);
-
-    carRef.current = {
-      x: track.start.x,
-      y: track.start.y,
-      angle: track.start.angle,
-      speed: 0,
-      stunnedUntil: 0,
-      boostedUntil: 0,
+    carRef.current = createDefaultCar(track.start);
+    raceRef.current = {
+      nextCheckpoint: 1,
+      laps: 0,
+      score: 0,
+      roundEnd: getRoundEndTime(),
     };
-    raceRef.current = { nextCheckpoint: 1, laps: 0, score: 0, startTime: performance.now() };
     othersRef.current = {};
     rocketsRef.current = [];
     explosionsRef.current = [];
     rocketsAmmoRef.current = 0;
     pickupStateRef.current = Object.fromEntries(
-      track.rocketPickups.map((p) => [p.id, { active: true, respawnAt: 0 }]),
+      track.powerups.map((p) => [p.id, { active: true, respawnAt: 0 }]),
     );
+    setRoundMessage('');
 
     const canvas = canvasRef.current;
     const container = containerRef.current;
@@ -124,32 +141,86 @@ export default function RaceRoom({ roomId }) {
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
 
+    function resetForNewRound() {
+      carRef.current = createDefaultCar(track.start);
+      raceRef.current.nextCheckpoint = 1;
+      raceRef.current.laps = 0;
+      raceRef.current.score = 0;
+      raceRef.current.roundEnd = getRoundEndTime();
+      rocketsAmmoRef.current = 0;
+      rocketsRef.current = [];
+      pickupStateRef.current = Object.fromEntries(
+        track.powerups.map((p) => [p.id, { active: true, respawnAt: 0 }]),
+      );
+      setRoundMessage('New round!');
+      setTimeout(() => setRoundMessage(''), 2500);
+    }
+
+    function takeHit(targetId, x, y, now) {
+      const isLocal = targetId === playerIdRef.current;
+      const entity = isLocal ? carRef.current : othersRef.current[targetId];
+      if (!entity || entity.eliminated || isInvincible(entity, now)) return;
+
+      explosionsRef.current.push(createExplosion(x, y));
+
+      if (entity.shields > 0) {
+        entity.shields -= 1;
+        applyStun(entity, now, 0.8);
+        entity.invincibleUntil = now + INVINCIBLE_MS;
+        return;
+      }
+
+      entity.lives -= 1;
+      applyStun(entity, now);
+
+      if (entity.lives <= 0) {
+        entity.eliminated = true;
+        entity.speed = 0;
+      } else if (isLocal) {
+        respawnCar(entity, track.start);
+      }
+
+      entity.invincibleUntil = now + INVINCIBLE_MS;
+    }
+
+    function broadcastHit(targetId, x, y) {
+      if (!connectedRef.current) return;
+      channel.send({
+        type: 'broadcast',
+        event: 'hit',
+        payload: { targetId, x, y, shooterId: playerIdRef.current },
+      });
+    }
+
     function tryFireRocket() {
-      if (rocketsAmmoRef.current <= 0) return;
       const car = carRef.current;
       const now = performance.now();
-      if (isStunned(car, now)) return;
+      if (car.eliminated || rocketsAmmoRef.current <= 0 || isStunned(car, now)) return;
 
       rocketsAmmoRef.current -= 1;
-      const rocket = createRocket(
-        car.x + Math.cos(car.angle) * 28,
-        car.y + Math.sin(car.angle) * 28,
-        car.angle,
-        playerIdRef.current,
-      );
-      rocketsRef.current.push(rocket);
+      const spawnX = car.x + Math.cos(car.angle) * 28;
+      const spawnY = car.y + Math.sin(car.angle) * 28;
+
+      const newRockets = car.spreadShot
+        ? createSpreadRockets(spawnX, spawnY, car.angle, playerIdRef.current)
+        : [createRocket(spawnX, spawnY, car.angle, playerIdRef.current)];
+
+      car.spreadShot = false;
+      rocketsRef.current.push(...newRockets);
 
       if (connectedRef.current) {
-        channel.send({
-          type: 'broadcast',
-          event: 'rocket',
-          payload: {
-            id: rocket.id,
-            x: rocket.x,
-            y: rocket.y,
-            angle: rocket.angle,
-            ownerId: playerIdRef.current,
-          },
+        newRockets.forEach((rocket) => {
+          channel.send({
+            type: 'broadcast',
+            event: 'rocket',
+            payload: {
+              id: rocket.id,
+              x: rocket.x,
+              y: rocket.y,
+              angle: rocket.angle,
+              ownerId: playerIdRef.current,
+            },
+          });
         });
       }
     }
@@ -169,15 +240,12 @@ export default function RaceRoom({ roomId }) {
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
 
-    const channel = supabase.channel(
-      `race-room-${roomId}-${track.id}-${collisionsEnabled ? 'col' : 'noc'}`,
-      {
-        config: {
-          broadcast: { self: false },
-          presence: { key: playerIdRef.current },
-        },
+    const channel = supabase.channel(`rocket-arena-${collisionsEnabled ? 'col' : 'noc'}`, {
+      config: {
+        broadcast: { self: false },
+        presence: { key: playerIdRef.current },
       },
-    );
+    });
 
     channel.on('broadcast', { event: 'position' }, (payload) => {
       const data = payload.payload;
@@ -189,20 +257,12 @@ export default function RaceRoom({ roomId }) {
       const data = payload.payload;
       if (data.ownerId === playerIdRef.current) return;
       if (rocketsRef.current.some((r) => r.id === data.id)) return;
-      rocketsRef.current.push({ ...data, speed: 680 });
+      rocketsRef.current.push({ ...data, speed: 620 });
     });
 
     channel.on('broadcast', { event: 'hit' }, (payload) => {
       const data = payload.payload;
-      const now = performance.now();
-
-      if (data.targetId === playerIdRef.current) {
-        applyStun(carRef.current, now);
-      }
-      if (othersRef.current[data.targetId]) {
-        applyStun(othersRef.current[data.targetId], now);
-      }
-      explosionsRef.current.push(createExplosion(data.x, data.y));
+      takeHit(data.targetId, data.x, data.y, performance.now());
     });
 
     channel.on('broadcast', { event: 'pickup' }, (payload) => {
@@ -223,13 +283,7 @@ export default function RaceRoom({ roomId }) {
       if (status === 'SUBSCRIBED') {
         connectedRef.current = true;
         setConnectionStatus('connected');
-        await channel.track({
-          name: playerName,
-          color: playerColor,
-          track: track.id,
-          collisions: collisionsEnabled,
-          online_at: new Date().toISOString(),
-        });
+        await channel.track({ name: playerName, color: playerColor, online_at: new Date().toISOString() });
       } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
         connectedRef.current = false;
         setConnectionStatus('error');
@@ -243,17 +297,25 @@ export default function RaceRoom({ roomId }) {
 
     function collectPickups(now) {
       const car = carRef.current;
+      if (car.eliminated) return;
 
-      track.rocketPickups.forEach((pickup) => {
+      track.powerups.forEach((pickup) => {
         const state = pickupStateRef.current[pickup.id];
-        if (!state.active && now >= state.respawnAt) {
-          state.active = true;
-        }
+        if (!state.active && now >= state.respawnAt) state.active = true;
         if (!state.active) return;
         if (distance(car.x, car.y, pickup.x, pickup.y) > PICKUP_RADIUS) return;
-        if (rocketsAmmoRef.current >= MAX_ROCKETS) return;
 
-        rocketsAmmoRef.current += 1;
+        if (pickup.type === 'rocket' && rocketsAmmoRef.current < MAX_ROCKETS) {
+          rocketsAmmoRef.current += 1;
+        } else if (pickup.type === 'shield' && car.shields < MAX_SHIELDS) {
+          car.shields += 1;
+        } else if (pickup.type === 'spread') {
+          car.spreadShot = true;
+          if (rocketsAmmoRef.current < MAX_ROCKETS) rocketsAmmoRef.current += 1;
+        } else {
+          return;
+        }
+
         state.active = false;
         state.respawnAt = now + PICKUP_RESPAWN * 1000;
 
@@ -283,41 +345,36 @@ export default function RaceRoom({ roomId }) {
           if (distance(rocket.x, rocket.y, car.x, car.y) < ROCKET_HIT_RADIUS) return alive;
 
           for (const [id, other] of Object.entries(othersRef.current)) {
+            if (other.eliminated) continue;
             if (distance(rocket.x, rocket.y, other.x, other.y) < ROCKET_HIT_RADIUS) {
-              applyStun(other, now);
-              explosionsRef.current.push(createExplosion(rocket.x, rocket.y));
-              if (connectedRef.current) {
-                channel.send({
-                  type: 'broadcast',
-                  event: 'hit',
-                  payload: { targetId: id, x: rocket.x, y: rocket.y, shooterId: playerIdRef.current },
-                });
-              }
+              takeHit(id, rocket.x, rocket.y, now);
+              broadcastHit(id, rocket.x, rocket.y);
               return false;
             }
           }
         }
 
-        if (rocket.ownerId !== playerIdRef.current && distance(rocket.x, rocket.y, car.x, car.y) < ROCKET_HIT_RADIUS) {
-          applyStun(car, now);
-          explosionsRef.current.push(createExplosion(rocket.x, rocket.y));
+        if (
+          rocket.ownerId !== playerIdRef.current &&
+          !car.eliminated &&
+          !isInvincible(car, now) &&
+          distance(rocket.x, rocket.y, car.x, car.y) < ROCKET_HIT_RADIUS
+        ) {
+          takeHit(playerIdRef.current, rocket.x, rocket.y, now);
           return false;
         }
 
         return alive;
       });
 
-      explosionsRef.current = explosionsRef.current.filter(
-        (ex) => now - ex.bornAt < ex.duration,
-      );
+      explosionsRef.current = explosionsRef.current.filter((ex) => now - ex.bornAt < ex.duration);
     }
 
-    function updateCollisions() {
-      if (!collisionsEnabled) return;
-      const car = carRef.current;
-      Object.values(othersRef.current).forEach((other) => {
-        resolveCarCollision(car, other);
-      });
+    function checkRound(nowMs) {
+      const roundEnd = getRoundEndTime(nowMs);
+      if (raceRef.current.roundEnd !== roundEnd) {
+        resetForNewRound();
+      }
     }
 
     function update(deltaTime) {
@@ -325,23 +382,31 @@ export default function RaceRoom({ roomId }) {
       const keys = keysRef.current;
       const race = raceRef.current;
       const now = performance.now();
-      const stunned = isStunned(car, now);
-      const boosted = car.boostedUntil && now < car.boostedUntil;
+      const nowMs = Date.now();
+
+      checkRound(nowMs);
+
+      if (car.eliminated) {
+        updateRockets(now, deltaTime);
+        return;
+      }
 
       collectPickups(now);
 
+      const stunned = isStunned(car, now);
+      const boosted = car.boostedUntil && now < car.boostedUntil;
       const onTrack = track.isOnTrack(car.x, car.y);
-      const acceleration = onTrack ? 420 : 280;
-      const friction = onTrack ? 110 : 85;
-      const turnSpeed = onTrack ? 3.4 : 2.6;
-      let maxSpeed = onTrack ? 520 : 240;
+      const acceleration = onTrack ? 300 : 200;
+      const friction = onTrack ? 115 : 90;
+      const turnSpeed = onTrack ? 3.2 : 2.4;
+      let maxSpeed = onTrack ? 380 : 175;
       if (boosted) maxSpeed *= BOOST_MULTIPLIER;
 
       if (!stunned) {
         if (keys['ArrowUp'] || keys['w']) car.speed += acceleration * deltaTime;
         if (keys['ArrowDown'] || keys['s']) car.speed -= acceleration * deltaTime;
 
-        const turnFactor = Math.max(Math.abs(car.speed) / 420, 0.35);
+        const turnFactor = Math.max(Math.abs(car.speed) / 380, 0.35);
         if (keys['ArrowLeft'] || keys['a']) car.angle -= turnSpeed * deltaTime * turnFactor;
         if (keys['ArrowRight'] || keys['d']) car.angle += turnSpeed * deltaTime * turnFactor;
       } else {
@@ -368,11 +433,14 @@ export default function RaceRoom({ roomId }) {
 
       car.x += Math.cos(car.angle) * car.speed * deltaTime;
       car.y += Math.sin(car.angle) * car.speed * deltaTime;
-
       car.x = Math.max(CAR_RADIUS, Math.min(car.x, track.world.width - CAR_RADIUS));
       car.y = Math.max(CAR_RADIUS, Math.min(car.y, track.world.height - CAR_RADIUS));
 
-      updateCollisions();
+      if (collisionsEnabled) {
+        Object.values(othersRef.current).forEach((other) => {
+          if (!other.eliminated) resolveCarCollision(car, other);
+        });
+      }
 
       const target = track.checkpoints[race.nextCheckpoint];
       if (distance(car.x, car.y, target.x, target.y) < CHECKPOINT_RADIUS) {
@@ -395,11 +463,30 @@ export default function RaceRoom({ roomId }) {
       updateRockets(now, deltaTime);
     }
 
-    function drawCarAt(x, y, angle, color, name, score, stunned, boosted) {
+    function drawLives(x, y, lives, shields) {
+      ctx.font = '14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#fff';
+      const hearts = '❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, MAX_LIVES - lives));
+      ctx.fillText(hearts, x, y);
+      if (shields > 0) ctx.fillText('🛡️', x, y + 16);
+    }
+
+    function drawCarAt(x, y, angle, color, name, score, car, now) {
+      const stunned = isStunned(car, now);
+      const invincible = isInvincible(car, now);
+      const boosted = car.boostedUntil && now < car.boostedUntil;
+      const eliminated = car.eliminated;
+
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(angle);
+      if (eliminated) ctx.globalAlpha = 0.35;
       if (stunned) ctx.filter = 'hue-rotate(180deg) brightness(1.3)';
+      if (invincible && !eliminated) {
+        ctx.shadowColor = '#fff';
+        ctx.shadowBlur = 14;
+      }
       if (boosted) {
         ctx.shadowColor = '#00d4ff';
         ctx.shadowBlur = 16;
@@ -413,12 +500,13 @@ export default function RaceRoom({ roomId }) {
       ctx.font = 'bold 13px sans-serif';
       ctx.textAlign = 'center';
       ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fillRect(x - 42, y - 48, 84, 34);
+      ctx.fillRect(x - 48, y - 62, 96, eliminated ? 48 : 58);
+      drawLives(x, y - 52, car.lives ?? MAX_LIVES, car.shields ?? 0);
       ctx.fillStyle = '#ffd700';
-      ctx.fillText(`${score} pts`, x, y - 30);
-      ctx.fillStyle = stunned ? '#ff6b6b' : '#fff';
+      ctx.fillText(`${score} pts`, x, y - 32);
+      ctx.fillStyle = eliminated ? '#888' : stunned ? '#ff6b6b' : '#fff';
       ctx.font = '12px sans-serif';
-      ctx.fillText(stunned ? '💫 Stunned!' : name, x, y - 14);
+      ctx.fillText(eliminated ? '💀 Out' : stunned ? '💫 Stunned' : name, x, y - 16);
     }
 
     function drawRocket(r) {
@@ -432,20 +520,36 @@ export default function RaceRoom({ roomId }) {
       ctx.lineTo(-8, 6);
       ctx.closePath();
       ctx.fill();
-      ctx.fillStyle = '#ffaa00';
-      ctx.beginPath();
-      ctx.arc(-10, 0, 4, 0, Math.PI * 2);
-      ctx.fill();
       ctx.restore();
     }
 
     function drawExplosion(ex, now) {
       const t = (now - ex.bornAt) / ex.duration;
-      const radius = 12 + t * 40;
       ctx.fillStyle = `rgba(255, ${120 - t * 80}, 0, ${1 - t})`;
       ctx.beginPath();
-      ctx.arc(ex.x, ex.y, radius, 0, Math.PI * 2);
+      ctx.arc(ex.x, ex.y, 12 + t * 40, 0, Math.PI * 2);
       ctx.fill();
+    }
+
+    function drawHud(width, car) {
+      const timeLeft = getRoundTimeLeft();
+
+      ctx.fillStyle = 'rgba(0,0,0,0.65)';
+      ctx.fillRect(width / 2 - 70, 8, 140, 36);
+      ctx.fillStyle = timeLeft < 30000 ? '#ff6666' : '#fff';
+      ctx.font = 'bold 18px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(formatTime(timeLeft), width / 2, 32);
+
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(10, 10, 220, 88);
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(`🚀 ${rocketsAmmoRef.current}/${MAX_ROCKETS}${car.spreadShot ? ' 💥spread ready' : ''}`, 20, 30);
+      ctx.fillText('Space — fire', 20, 48);
+      ctx.fillText(`❤️ Lives: ${car.lives}/${MAX_LIVES}`, 20, 66);
+      ctx.fillText(`🛡️ Shield: ${car.shields}/${MAX_SHIELDS}`, 20, 84);
     }
 
     function draw() {
@@ -466,40 +570,32 @@ export default function RaceRoom({ roomId }) {
       rocketsRef.current.forEach(drawRocket);
 
       Object.values(othersRef.current).forEach((other) => {
-        drawCarAt(
-          other.x,
-          other.y,
-          other.angle,
-          other.color,
-          other.name,
-          other.score ?? 0,
-          isStunned(other, now),
-          false,
-        );
+        drawCarAt(other.x, other.y, other.angle, other.color, other.name, other.score ?? 0, other, now);
       });
 
-      drawCarAt(
-        car.x,
-        car.y,
-        car.angle,
-        playerColor,
-        playerName,
-        raceRef.current.score,
-        isStunned(car, now),
-        car.boostedUntil && now < car.boostedUntil,
-      );
+      drawCarAt(car.x, car.y, car.angle, playerColor, playerName, raceRef.current.score, car, now);
       ctx.restore();
 
       drawMinimap(ctx, track, camera, { width, height }, car, othersRef.current, playerColor);
+      drawHud(width, car);
 
-      ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fillRect(10, 10, 210, collisionsEnabled ? 72 : 56);
-      ctx.fillStyle = '#fff';
-      ctx.font = '12px sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillText(`🚀 Rockets: ${rocketsAmmoRef.current}/${MAX_ROCKETS}`, 20, 30);
-      ctx.fillText('Space — fire rocket', 20, 48);
-      if (collisionsEnabled) ctx.fillText('💥 Collisions ON', 20, 64);
+      if (roundMessage) {
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(0, height / 2 - 40, width, 80);
+        ctx.fillStyle = '#ffd700';
+        ctx.font = 'bold 28px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(roundMessage, width / 2, height / 2 + 10);
+      }
+
+      if (car.eliminated) {
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(width / 2 - 120, height - 60, 240, 44);
+        ctx.fillStyle = '#ff8888';
+        ctx.font = '16px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Eliminated — wait for next round', width / 2, height - 32);
+      }
     }
 
     function loop(currentTime) {
@@ -512,9 +608,11 @@ export default function RaceRoom({ roomId }) {
       if (currentTime - lastUiUpdate > 100) {
         lastUiUpdate = currentTime;
         const race = raceRef.current;
+        const car = carRef.current;
         setDisplayScore(race.score);
-        setDisplayLaps(race.laps);
-        setDisplayTime((currentTime - race.startTime) / 1000);
+        setDisplayLives(car.lives);
+        setDisplayShields(car.shields);
+        setDisplayRoundTime(formatTime(getRoundTimeLeft()));
         setDisplayRockets(rocketsAmmoRef.current);
       }
 
@@ -532,7 +630,10 @@ export default function RaceRoom({ roomId }) {
             color: playerColor,
             name: playerName,
             score: raceRef.current.score,
+            lives: car.lives,
+            shields: car.shields,
             stunnedUntil: car.stunnedUntil || 0,
+            eliminated: car.eliminated,
           },
         });
       }
@@ -551,7 +652,7 @@ export default function RaceRoom({ roomId }) {
       channel.untrack();
       supabase.removeChannel(channel);
     };
-  }, [roomId, playerColor, playerName, trackId, collisionsEnabled]);
+  }, [playerColor, playerName, collisionsEnabled, track]);
 
   return (
     <div style={{ backgroundColor: 'black', minHeight: '100vh' }}>
@@ -560,19 +661,18 @@ export default function RaceRoom({ roomId }) {
           color: 'white',
           padding: '1rem',
           display: 'flex',
-          gap: '1.5rem',
+          gap: '1.2rem',
           flexWrap: 'wrap',
           alignItems: 'center',
         }}
       >
-        <h1 style={{ margin: 0 }}>Room: {roomId}</h1>
-        <div>{trackName}</div>
+        <h1 style={{ margin: 0 }}>🚀 Rocket Arena</h1>
+        <div>Round: {displayRoundTime}</div>
         <div>Score: {displayScore}</div>
-        <div>Lap: {displayLaps}</div>
-        <div>Time: {displayTime.toFixed(1)}s</div>
-        <div>Players: {playerCount}</div>
+        <div>Lives: {'❤️'.repeat(displayLives)}{'🖤'.repeat(MAX_LIVES - displayLives)}</div>
+        {displayShields > 0 && <div>🛡️ Shield</div>}
         <div>🚀 {displayRockets}/{MAX_ROCKETS}</div>
-        {collisionsEnabled && <div>💥 Collisions</div>}
+        <div>Players: {playerCount}</div>
         <div style={{ opacity: 0.7 }}>
           {connectionStatus === 'connected' && '🟢 Online'}
           {connectionStatus === 'connecting' && '🟡 Connecting...'}
