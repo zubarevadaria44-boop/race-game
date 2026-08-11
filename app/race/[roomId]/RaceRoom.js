@@ -14,7 +14,6 @@ import {
   drawMinimap,
   drawHealthBar,
   distance,
-  isInLava,
 } from '@/lib/arena';
 import {
   CAR_RADIUS,
@@ -39,9 +38,7 @@ import {
   DRAGON_SPEED,
   DRAGON_ENRAGED_SPEED,
   resolveCarCollision,
-  isStunned,
   isInvincible,
-  applyStun,
   applyDamage,
   hpPercent,
   createRocket,
@@ -71,7 +68,6 @@ function upsertOther(othersRef, data) {
     hp: data.hp ?? e?.hp ?? MAX_PLAYER_HP,
     maxHp: MAX_PLAYER_HP,
     shields: data.shields ?? e?.shields ?? 0,
-    stunnedUntil: data.stunnedUntil ?? e?.stunnedUntil ?? 0,
     dead: data.dead ?? false,
   };
 }
@@ -189,7 +185,7 @@ export default function RaceRoom() {
     function tryFire() {
       const p = playerRef.current;
       const now = performance.now();
-      if (p.dead || rocketsAmmoRef.current <= 0 || isStunned(p, now)) return;
+      if (p.dead || rocketsAmmoRef.current <= 0) return;
 
       rocketsAmmoRef.current -= 1;
       const sx = p.x + Math.cos(p.angle) * 28;
@@ -447,23 +443,17 @@ export default function RaceRoom() {
       updateDragon(now, deltaTime);
       checkDragonBody(now);
 
-      const inLava = isInLava(p.x, p.y, dragon.x, dragon.y);
-      const stunned = isStunned(p, now);
-      const acceleration = inLava ? 180 : 320;
-      const friction = inLava ? 130 : 100;
-      const turnSpeed = inLava ? 2.2 : 3.4;
-      const maxSpeed = inLava ? 140 : 400;
+      const acceleration = 320;
+      const friction = 100;
+      const turnSpeed = 3.4;
+      const maxSpeed = 400;
 
-      if (!stunned) {
-        const keys = keysRef.current;
-        if (keys['ArrowUp'] || keys['w']) p.speed += acceleration * deltaTime;
-        if (keys['ArrowDown'] || keys['s']) p.speed -= acceleration * deltaTime;
-        const tf = Math.max(Math.abs(p.speed) / 400, 0.35);
-        if (keys['ArrowLeft'] || keys['a']) p.angle -= turnSpeed * deltaTime * tf;
-        if (keys['ArrowRight'] || keys['d']) p.angle += turnSpeed * deltaTime * tf;
-      } else {
-        p.angle += deltaTime * 9;
-      }
+      const keys = keysRef.current;
+      if (keys['ArrowUp'] || keys['w']) p.speed += acceleration * deltaTime;
+      if (keys['ArrowDown'] || keys['s']) p.speed -= acceleration * deltaTime;
+      const tf = Math.max(Math.abs(p.speed) / 400, 0.35);
+      if (keys['ArrowLeft'] || keys['a']) p.angle -= turnSpeed * deltaTime * tf;
+      if (keys['ArrowRight'] || keys['d']) p.angle += turnSpeed * deltaTime * tf;
 
       if (p.speed > maxSpeed) p.speed = maxSpeed;
       if (p.speed < -maxSpeed / 2) p.speed = -maxSpeed / 2;
@@ -500,7 +490,6 @@ export default function RaceRoom() {
     }
 
     function drawPlayer(x, y, angle, color, name, pl, now) {
-      const stunned = isStunned(pl, now);
       const inv = isInvincible(pl, now);
 
       ctx.save();
@@ -525,11 +514,6 @@ export default function RaceRoom() {
           ctx.font = '11px sans-serif';
           ctx.textAlign = 'center';
           ctx.fillText('🛡️', x, y - 58);
-        }
-        if (stunned) {
-          ctx.fillStyle = '#ff6b6b';
-          ctx.font = '11px sans-serif';
-          ctx.fillText('💫 Stunned', x, y - 38);
         }
         if (pl.kills > 0) {
           ctx.fillStyle = '#ffd700';
@@ -667,7 +651,6 @@ export default function RaceRoom() {
             dragonDamage: pl.dragonDamage,
             hp: pl.hp,
             shields: pl.shields,
-            stunnedUntil: pl.stunnedUntil || 0,
             dead: pl.dead,
           },
         });
