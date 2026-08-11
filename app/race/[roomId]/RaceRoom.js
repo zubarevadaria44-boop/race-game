@@ -4,16 +4,12 @@ import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import {
-  WORLD,
-  START,
-  CHECKPOINTS,
+  getTrack,
   CHECKPOINT_RADIUS,
   POINTS_PER_CHECKPOINT,
   POINTS_PER_LAP,
-  isOnTrack,
   clampCamera,
-  drawTrack,
-  drawCheckpoints,
+  drawMinimap,
   distance,
 } from '@/lib/track';
 
@@ -37,7 +33,9 @@ export default function RaceRoom({ roomId }) {
   const containerRef = useRef(null);
   const searchParams = useSearchParams();
   const playerColor = searchParams.get('color') || 'red';
-  const playerName = searchParams.get('name') || 'Игрок';
+  const playerName = searchParams.get('name') || 'Oyuncu';
+  const trackId = searchParams.get('track') || 'forest';
+  const trackName = getTrack(trackId).name;
 
   const playerIdRef = useRef(null);
   if (playerIdRef.current === null && typeof window !== 'undefined') {
@@ -49,12 +47,11 @@ export default function RaceRoom({ roomId }) {
     playerIdRef.current = id;
   }
 
-  const carRef = useRef({
-    x: START.x,
-    y: START.y,
-    angle: START.angle,
-    speed: 0,
-  });
+  const carRef = useRef(null);
+  if (!carRef.current) {
+    const start = getTrack(trackId).start;
+    carRef.current = { x: start.x, y: start.y, angle: start.angle, speed: 0 };
+  }
   const keysRef = useRef({});
   const raceRef = useRef({
     nextCheckpoint: 1,
@@ -73,6 +70,22 @@ export default function RaceRoom({ roomId }) {
   const [connectionStatus, setConnectionStatus] = useState('connecting');
 
   useEffect(() => {
+    const track = getTrack(trackId);
+
+    carRef.current = {
+      x: track.start.x,
+      y: track.start.y,
+      angle: track.start.angle,
+      speed: 0,
+    };
+    raceRef.current = {
+      nextCheckpoint: 1,
+      laps: 0,
+      score: 0,
+      startTime: performance.now(),
+    };
+    othersRef.current = {};
+
     const canvas = canvasRef.current;
     const container = containerRef.current;
     const ctx = canvas.getContext('2d');
@@ -97,7 +110,7 @@ export default function RaceRoom({ roomId }) {
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
 
-    const channel = supabase.channel(`race-room-${roomId}`, {
+    const channel = supabase.channel(`race-room-${roomId}-${track.id}`, {
       config: {
         broadcast: { self: false },
         presence: { key: playerIdRef.current },
@@ -129,6 +142,7 @@ export default function RaceRoom({ roomId }) {
         await channel.track({
           name: playerName,
           color: playerColor,
+          track: track.id,
           online_at: new Date().toISOString(),
         });
       } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
@@ -147,11 +161,11 @@ export default function RaceRoom({ roomId }) {
       const keys = keysRef.current;
       const race = raceRef.current;
 
-      const onTrack = isOnTrack(car.x, car.y);
-      const acceleration = onTrack ? 280 : 160;
-      const friction = onTrack ? 140 : 220;
-      const turnSpeed = onTrack ? 2.8 : 1.8;
-      const maxSpeed = onTrack ? 360 : 110;
+      const onTrack = track.isOnTrack(car.x, car.y);
+      const acceleration = onTrack ? 420 : 280;
+      const friction = onTrack ? 110 : 85;
+      const turnSpeed = onTrack ? 3.4 : 2.6;
+      const maxSpeed = onTrack ? 520 : 240;
 
       if (keys['ArrowUp'] || keys['w']) car.speed += acceleration * deltaTime;
       if (keys['ArrowDown'] || keys['s']) car.speed -= acceleration * deltaTime;
@@ -159,30 +173,37 @@ export default function RaceRoom({ roomId }) {
       if (car.speed > maxSpeed) car.speed = maxSpeed;
       if (car.speed < -maxSpeed / 2) car.speed = -maxSpeed / 2;
 
-      if (car.speed > 0) {
-        car.speed -= friction * deltaTime;
-        if (car.speed < 0) car.speed = 0;
-      } else if (car.speed < 0) {
-        car.speed += friction * deltaTime;
-        if (car.speed > 0) car.speed = 0;
+      const throttleHeld = keys['ArrowUp'] || keys['w'] || keys['ArrowDown'] || keys['s'];
+      if (!throttleHeld) {
+        if (car.speed > 0) {
+          car.speed -= friction * deltaTime;
+          if (car.speed < 0) car.speed = 0;
+        } else if (car.speed < 0) {
+          car.speed += friction * deltaTime;
+          if (car.speed > 0) car.speed = 0;
+        }
+      } else if (Math.abs(car.speed) > 0) {
+        const drag = friction * 0.35 * deltaTime;
+        if (car.speed > 0) car.speed = Math.max(0, car.speed - drag);
+        else car.speed = Math.min(0, car.speed + drag);
       }
 
-      const turnFactor = Math.max(Math.abs(car.speed) / 360, 0.25);
+      const turnFactor = Math.max(Math.abs(car.speed) / 420, 0.35);
       if (keys['ArrowLeft'] || keys['a']) car.angle -= turnSpeed * deltaTime * turnFactor;
       if (keys['ArrowRight'] || keys['d']) car.angle += turnSpeed * deltaTime * turnFactor;
 
       car.x += Math.cos(car.angle) * car.speed * deltaTime;
       car.y += Math.sin(car.angle) * car.speed * deltaTime;
 
-      car.x = Math.max(20, Math.min(car.x, WORLD.width - 20));
-      car.y = Math.max(20, Math.min(car.y, WORLD.height - 20));
+      car.x = Math.max(20, Math.min(car.x, track.world.width - 20));
+      car.y = Math.max(20, Math.min(car.y, track.world.height - 20));
 
-      const target = CHECKPOINTS[race.nextCheckpoint];
+      const target = track.checkpoints[race.nextCheckpoint];
       if (distance(car.x, car.y, target.x, target.y) < CHECKPOINT_RADIUS) {
         race.score += POINTS_PER_CHECKPOINT;
         race.nextCheckpoint++;
 
-        if (race.nextCheckpoint >= CHECKPOINTS.length) {
+        if (race.nextCheckpoint >= track.checkpoints.length) {
           race.nextCheckpoint = 0;
           race.laps++;
           race.score += POINTS_PER_LAP;
@@ -221,14 +242,14 @@ export default function RaceRoom({ roomId }) {
     function draw() {
       const car = carRef.current;
       const { width, height } = viewSizeRef.current;
-      const camera = clampCamera(car.x - width / 2, car.y - height / 2, width, height);
+      const camera = clampCamera(car.x - width / 2, car.y - height / 2, width, height, track.world);
 
       ctx.clearRect(0, 0, width, height);
       ctx.save();
       ctx.translate(-camera.x, -camera.y);
 
-      drawTrack(ctx);
-      drawCheckpoints(ctx, raceRef.current.nextCheckpoint);
+      track.drawTrack(ctx);
+      track.drawCheckpoints(ctx, raceRef.current.nextCheckpoint);
 
       Object.values(othersRef.current).forEach((other) => {
         drawCarAt(other.x, other.y, other.angle, other.color, other.name, other.score ?? 0);
@@ -236,6 +257,8 @@ export default function RaceRoom({ roomId }) {
 
       drawCarAt(car.x, car.y, car.angle, playerColor, playerName, raceRef.current.score);
       ctx.restore();
+
+      drawMinimap(ctx, track, camera, { width, height }, car, othersRef.current, playerColor);
     }
 
     function loop(currentTime) {
@@ -285,7 +308,7 @@ export default function RaceRoom({ roomId }) {
       channel.untrack();
       supabase.removeChannel(channel);
     };
-  }, [roomId, playerColor, playerName]);
+  }, [roomId, playerColor, playerName, trackId]);
 
   return (
     <div style={{ backgroundColor: 'black', minHeight: '100vh' }}>
@@ -299,7 +322,8 @@ export default function RaceRoom({ roomId }) {
           alignItems: 'center',
         }}
       >
-        <h1 style={{ margin: 0 }}>Комната: {roomId}</h1>
+        <h1 style={{ margin: 0 }}>Oda: {roomId}</h1>
+        <div>{trackName}</div>
         <div>Puan: {displayScore}</div>
         <div>Tur: {displayLaps}</div>
         <div>Süre: {displayTime.toFixed(1)}s</div>
