@@ -5,10 +5,10 @@ import { useRouter } from 'next/navigation';
 import { TRACK_LIST } from '@/lib/track';
 
 const COLORS = [
-  { name: 'Красный', value: 'red' },
-  { name: 'Синий', value: 'blue' },
-  { name: 'Зелёный', value: 'green' },
-  { name: 'Жёлтый', value: 'yellow' },
+  { name: 'Red', value: 'red' },
+  { name: 'Blue', value: 'blue' },
+  { name: 'Green', value: 'green' },
+  { name: 'Yellow', value: 'yellow' },
 ];
 
 function generateRoomCode() {
@@ -22,13 +22,19 @@ export default function HomePage() {
   const [color, setColor] = useState('red');
   const [joinCode, setJoinCode] = useState('');
   const [trackId, setTrackId] = useState(TRACK_LIST[0].id);
+  const [collisions, setCollisions] = useState(true);
 
   function goToRoom(roomId) {
     if (!playerName.trim()) {
-      alert('İsim gir!');
+      alert('Enter your name!');
       return;
     }
-    const params = new URLSearchParams({ name: playerName, color, track: trackId });
+    const params = new URLSearchParams({
+      name: playerName,
+      color,
+      track: trackId,
+      collisions: collisions ? '1' : '0',
+    });
     router.push(`/race/${roomId}?${params.toString()}`);
   }
 
@@ -38,7 +44,7 @@ export default function HomePage() {
 
   function handleJoin() {
     if (!joinCode.trim()) {
-      alert('Oda kodu gir!');
+      alert('Enter a room code!');
       return;
     }
     goToRoom(joinCode.trim());
@@ -58,21 +64,21 @@ export default function HomePage() {
         padding: '2rem',
       }}
     >
-      <h1 style={{ fontSize: '2rem' }}>🏎️ Yarış</h1>
+      <h1 style={{ fontSize: '2rem' }}>🏎️ Race Game</h1>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '320px' }}>
-        <label>İsim</label>
+        <label>Name</label>
         <input
           type="text"
           value={playerName}
           onChange={(e) => setPlayerName(e.target.value)}
-          placeholder="Adın"
+          placeholder="Your name"
           style={{ padding: '0.5rem', fontSize: '1rem' }}
         />
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '320px' }}>
-        <label>Araba rengi</label>
+        <label>Car color</label>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           {COLORS.map((c) => (
             <button
@@ -93,7 +99,7 @@ export default function HomePage() {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '320px' }}>
-        <label>Pist seç</label>
+        <label>Select track</label>
         <select
           value={trackId}
           onChange={(e) => setTrackId(e.target.value)}
@@ -107,11 +113,20 @@ export default function HomePage() {
         </select>
       </div>
 
+      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', width: '320px', cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={collisions}
+          onChange={(e) => setCollisions(e.target.checked)}
+        />
+        Car collisions (block opponents)
+      </label>
+
       <button
         onClick={handleCreate}
         style={{ padding: '0.75rem 1.5rem', fontSize: '1rem', width: '320px', cursor: 'pointer' }}
       >
-        Oda oluştur
+        Create room
       </button>
 
       <div style={{ display: 'flex', gap: '0.5rem', width: '320px' }}>
@@ -119,11 +134,11 @@ export default function HomePage() {
           type="text"
           value={joinCode}
           onChange={(e) => setJoinCode(e.target.value)}
-          placeholder="Oda kodu"
+          placeholder="Room code"
           style={{ padding: '0.5rem', fontSize: '1rem', flex: 1 }}
         />
         <button onClick={handleJoin} style={{ padding: '0.5rem 1rem', cursor: 'pointer' }}>
-          Katıl
+          Join
         </button>
       </div>
     </div>
