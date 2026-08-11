@@ -3,23 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "concurrently \"npm run dev:ws\" \"npm run dev:next\"",
-    "dev:next": "next dev",
-    "dev:ws": "node server/ws-server.js",
+    "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "start:ws": "node server/ws-server.js",
     "lint": "eslint"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
     "next": "16.3.0",
     "react": "19.2.8",
-    "react-dom": "19.2.8",
-    "ws": "^8.18.3"
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "concurrently": "^9.2.0",
     "eslint": "^9",
     "eslint-config-next": "16.3.0",
     "tailwindcss": "^4"

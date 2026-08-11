@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { getWsUrl } from '@/lib/ws';
+import { supabase } from '@/lib/supabase';
 
 const TRACK = {
   centerX: 400,
@@ -36,24 +36,6 @@ function distance(x1, y1, x2, y2) {
   return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
 }
 
-function upsertOther(othersRef, data) {
-  const existing = othersRef.current[data.id];
-  othersRef.current[data.id] = {
-    x: existing ? existing.x : data.x,
-    y: existing ? existing.y : data.y,
-    angle: existing ? existing.angle : data.angle,
-    targetX: data.x,
-    targetY: data.y,
-    targetAngle: data.angle,
-    color: data.color,
-    name: data.name,
-  };
-}
-
-function updatePlayerCount(othersRef, setPlayerCount) {
-  setPlayerCount(Object.keys(othersRef.current).length + 1);
-}
-
 export default function RaceRoom({ roomId }) {
   const canvasRef = useRef(null);
   const searchParams = useSearchParams();
@@ -85,7 +67,7 @@ export default function RaceRoom({ roomId }) {
     startTime: performance.now(),
   });
   const othersRef = useRef({});
-  const wsRef = useRef(null);
+  const connectedRef = useRef(false);
 
   const [displayLaps, setDisplayLaps] = useState(0);
   const [displayTime, setDisplayTime] = useState(0);
@@ -95,7 +77,6 @@ export default function RaceRoom({ roomId }) {
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
-    let closed = false;
 
     const handleKeyDown = (e) => {
       keysRef.current[e.key] = true;
@@ -106,75 +87,56 @@ export default function RaceRoom({ roomId }) {
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
 
-    function handleMessage(event) {
-      let data;
-      try {
-        data = JSON.parse(event.data);
-      } catch {
-        return;
-      }
+    const channel = supabase.channel(`race-room-${roomId}`, {
+      config: {
+        broadcast: { self: false },
+        presence: { key: playerIdRef.current },
+      },
+    });
 
+    channel.on('broadcast', { event: 'position' }, (payload) => {
+      const data = payload.payload;
       if (data.id === playerIdRef.current) return;
 
-      if (data.type === 'sync') {
-        data.players.forEach((player) => upsertOther(othersRef, player));
-        updatePlayerCount(othersRef, setPlayerCount);
-        return;
-      }
-
-      if (data.type === 'join') {
-        upsertOther(othersRef, data);
-        updatePlayerCount(othersRef, setPlayerCount);
-        return;
-      }
-
-      if (data.type === 'leave') {
-        delete othersRef.current[data.id];
-        updatePlayerCount(othersRef, setPlayerCount);
-        return;
-      }
-
-      if (data.type === 'position') {
-        upsertOther(othersRef, data);
-      }
-    }
-
-    function connect() {
-      if (closed || !playerIdRef.current) return;
-
-      const ws = new WebSocket(getWsUrl(roomId, playerIdRef.current));
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setConnectionStatus('connected');
-        const car = carRef.current;
-        ws.send(
-          JSON.stringify({
-            type: 'join',
-            name: playerName,
-            color: playerColor,
-            x: car.x,
-            y: car.y,
-            angle: car.angle,
-          }),
-        );
+      const existing = othersRef.current[data.id];
+      othersRef.current[data.id] = {
+        x: existing ? existing.x : data.x,
+        y: existing ? existing.y : data.y,
+        angle: existing ? existing.angle : data.angle,
+        targetX: data.x,
+        targetY: data.y,
+        targetAngle: data.angle,
+        color: data.color,
+        name: data.name,
       };
+    });
 
-      ws.onmessage = handleMessage;
+    channel.on('presence', { event: 'sync' }, () => {
+      const state = channel.presenceState();
+      const activeIds = new Set(Object.keys(state));
 
-      ws.onclose = () => {
-        setConnectionStatus('reconnecting');
-        if (!closed) {
-          setTimeout(connect, 1000);
+      Object.keys(othersRef.current).forEach((id) => {
+        if (!activeIds.has(id)) {
+          delete othersRef.current[id];
         }
-      };
+      });
+      setPlayerCount(activeIds.size);
+    });
 
-      ws.onerror = () => {
-        ws.close();
-      };
-    }
-
-    connect();
+    channel.subscribe(async (status) => {
+      if (status === 'SUBSCRIBED') {
+        connectedRef.current = true;
+        setConnectionStatus('connected');
+        await channel.track({
+          name: playerName,
+          color: playerColor,
+          online_at: new Date().toISOString(),
+        });
+      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        connectedRef.current = false;
+        setConnectionStatus('error');
+      }
+    });
 
     let lastTime = performance.now();
     let animationId;
@@ -297,21 +259,21 @@ export default function RaceRoom({ roomId }) {
         setDisplayTime((currentTime - raceRef.current.startTime) / 1000);
       }
 
-      const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN && currentTime - lastNetworkSend > 66) {
+      if (connectedRef.current && currentTime - lastNetworkSend > 66) {
         lastNetworkSend = currentTime;
         const car = carRef.current;
-        ws.send(
-          JSON.stringify({
-            type: 'position',
+        channel.send({
+          type: 'broadcast',
+          event: 'position',
+          payload: {
             id: playerIdRef.current,
             x: car.x,
             y: car.y,
             angle: car.angle,
             color: playerColor,
             name: playerName,
-          }),
-        );
+          },
+        });
       }
 
       animationId = requestAnimationFrame(loop);
@@ -320,11 +282,12 @@ export default function RaceRoom({ roomId }) {
     animationId = requestAnimationFrame(loop);
 
     return () => {
-      closed = true;
+      connectedRef.current = false;
       cancelAnimationFrame(animationId);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
-      wsRef.current?.close();
+      channel.untrack();
+      supabase.removeChannel(channel);
     };
   }, [roomId, playerColor, playerName]);
 
@@ -336,7 +299,9 @@ export default function RaceRoom({ roomId }) {
         <div>Время: {displayTime.toFixed(1)}с</div>
         <div>Игроков: {playerCount}</div>
         <div style={{ opacity: 0.7 }}>
-          {connectionStatus === 'connected' ? '🟢 Online' : '🟡 Подключение...'}
+          {connectionStatus === 'connected' && '🟢 Online'}
+          {connectionStatus === 'connecting' && '🟡 Подключение...'}
+          {connectionStatus === 'error' && '🔴 Ошибка подключения'}
         </div>
       </div>
       <canvas
