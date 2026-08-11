@@ -12,8 +12,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata = {
-  title: 'Race Game',
-  description: 'Multiplayer racing game',
+  title: 'Dragon Battle',
+  description: 'Multiplayer dragon boss battle arena',
 };
 
 export default function RootLayout({ children }) {

@@ -35,7 +35,7 @@ export default function HomePage() {
     <div
       style={{
         minHeight: '100vh',
-        backgroundColor: '#111',
+        backgroundColor: '#0a0808',
         color: 'white',
         display: 'flex',
         flexDirection: 'column',
@@ -45,13 +45,14 @@ export default function HomePage() {
         padding: '2rem',
       }}
     >
-      <h1 style={{ fontSize: '2rem', margin: 0 }}>🏎️ Rocket Arena</h1>
-      <p style={{ margin: 0, opacity: 0.7, textAlign: 'center', maxWidth: 360 }}>
-        3-minute rounds · 3 lives · grab rockets, shields &amp; spread shots
+      <h1 style={{ fontSize: '2.2rem', margin: 0 }}>🐉 Dragon Battle</h1>
+      <p style={{ margin: 0, opacity: 0.75, textAlign: 'center', maxWidth: 400, lineHeight: 1.5 }}>
+        Team up or fight each other — defeat the fire-breathing dragon in the arena!
+        Grab rockets, shields &amp; spread shots. No timer, pure battle.
       </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '320px' }}>
-        <label>Name</label>
+        <label>Hero name</label>
         <input
           type="text"
           value={playerName}
@@ -84,7 +85,7 @@ export default function HomePage() {
 
       <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', width: '320px', cursor: 'pointer' }}>
         <input type="checkbox" checked={collisions} onChange={(e) => setCollisions(e.target.checked)} />
-        Car collisions
+        Bump into other players
       </label>
 
       <button
@@ -95,9 +96,13 @@ export default function HomePage() {
           width: '320px',
           cursor: 'pointer',
           fontWeight: 'bold',
+          background: '#cc3300',
+          color: 'white',
+          border: 'none',
+          borderRadius: '8px',
         }}
       >
-        Play
+        Enter Arena
       </button>
     </div>
   );
