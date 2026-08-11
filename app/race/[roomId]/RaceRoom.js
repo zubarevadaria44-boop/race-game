@@ -3,72 +3,70 @@
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
+import {
+  WORLD,
+  START,
+  CHECKPOINTS,
+  CHECKPOINT_RADIUS,
+  POINTS_PER_CHECKPOINT,
+  POINTS_PER_LAP,
+  isOnTrack,
+  clampCamera,
+  drawTrack,
+  drawCheckpoints,
+  distance,
+} from '@/lib/track';
 
-const TRACK = {
-  centerX: 400,
-  centerY: 300,
-  outerRx: 350,
-  outerRy: 250,
-  innerRx: 150,
-  innerRy: 100,
-};
-
-const CHECKPOINTS = [
-  { x: 400, y: 50 },
-  { x: 750, y: 300 },
-  { x: 400, y: 550 },
-  { x: 50, y: 300 },
-];
-
-const CHECKPOINT_RADIUS = 60;
-
-function isOnTrack(x, y) {
-  const outerVal =
-    (x - TRACK.centerX) ** 2 / TRACK.outerRx ** 2 +
-    (y - TRACK.centerY) ** 2 / TRACK.outerRy ** 2;
-  const innerVal =
-    (x - TRACK.centerX) ** 2 / TRACK.innerRx ** 2 +
-    (y - TRACK.centerY) ** 2 / TRACK.innerRy ** 2;
-  return outerVal <= 1 && innerVal >= 1;
-}
-
-function distance(x1, y1, x2, y2) {
-  return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+function upsertOther(othersRef, data) {
+  const existing = othersRef.current[data.id];
+  othersRef.current[data.id] = {
+    x: existing ? existing.x : data.x,
+    y: existing ? existing.y : data.y,
+    angle: existing ? existing.angle : data.angle,
+    targetX: data.x,
+    targetY: data.y,
+    targetAngle: data.angle,
+    color: data.color,
+    name: data.name,
+    score: data.score ?? existing?.score ?? 0,
+  };
 }
 
 export default function RaceRoom({ roomId }) {
   const canvasRef = useRef(null);
+  const containerRef = useRef(null);
   const searchParams = useSearchParams();
   const playerColor = searchParams.get('color') || 'red';
   const playerName = searchParams.get('name') || 'Игрок';
 
   const playerIdRef = useRef(null);
-  if (playerIdRef.current === null) {
-    if (typeof window !== 'undefined') {
-      let id = sessionStorage.getItem('race-player-id');
-      if (!id) {
-        id = crypto.randomUUID();
-        sessionStorage.setItem('race-player-id', id);
-      }
-      playerIdRef.current = id;
+  if (playerIdRef.current === null && typeof window !== 'undefined') {
+    let id = sessionStorage.getItem('race-player-id');
+    if (!id) {
+      id = crypto.randomUUID();
+      sessionStorage.setItem('race-player-id', id);
     }
+    playerIdRef.current = id;
   }
 
   const carRef = useRef({
-    x: 400,
-    y: 50,
-    angle: 0,
+    x: START.x,
+    y: START.y,
+    angle: START.angle,
     speed: 0,
   });
   const keysRef = useRef({});
   const raceRef = useRef({
-    nextCheckpoint: 0,
+    nextCheckpoint: 1,
     laps: 0,
+    score: 0,
     startTime: performance.now(),
   });
   const othersRef = useRef({});
   const connectedRef = useRef(false);
+  const viewSizeRef = useRef({ width: 1200, height: 720 });
 
+  const [displayScore, setDisplayScore] = useState(0);
   const [displayLaps, setDisplayLaps] = useState(0);
   const [displayTime, setDisplayTime] = useState(0);
   const [playerCount, setPlayerCount] = useState(1);
@@ -76,7 +74,19 @@ export default function RaceRoom({ roomId }) {
 
   useEffect(() => {
     const canvas = canvasRef.current;
+    const container = containerRef.current;
     const ctx = canvas.getContext('2d');
+
+    function resizeCanvas() {
+      const width = Math.min(container.clientWidth, 1280);
+      const height = Math.min(Math.floor(width * 0.62), window.innerHeight - 120);
+      canvas.width = width;
+      canvas.height = height;
+      viewSizeRef.current = { width, height };
+    }
+
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
 
     const handleKeyDown = (e) => {
       keysRef.current[e.key] = true;
@@ -97,18 +107,7 @@ export default function RaceRoom({ roomId }) {
     channel.on('broadcast', { event: 'position' }, (payload) => {
       const data = payload.payload;
       if (data.id === playerIdRef.current) return;
-
-      const existing = othersRef.current[data.id];
-      othersRef.current[data.id] = {
-        x: existing ? existing.x : data.x,
-        y: existing ? existing.y : data.y,
-        angle: existing ? existing.angle : data.angle,
-        targetX: data.x,
-        targetY: data.y,
-        targetAngle: data.angle,
-        color: data.color,
-        name: data.name,
-      };
+      upsertOther(othersRef, data);
     });
 
     channel.on('presence', { event: 'sync' }, () => {
@@ -148,12 +147,11 @@ export default function RaceRoom({ roomId }) {
       const keys = keysRef.current;
       const race = raceRef.current;
 
-      const acceleration = 300;
-      const friction = 150;
-      const turnSpeed = 3;
-
       const onTrack = isOnTrack(car.x, car.y);
-      const maxSpeed = onTrack ? 400 : 200;
+      const acceleration = onTrack ? 280 : 160;
+      const friction = onTrack ? 140 : 220;
+      const turnSpeed = onTrack ? 2.8 : 1.8;
+      const maxSpeed = onTrack ? 360 : 110;
 
       if (keys['ArrowUp'] || keys['w']) car.speed += acceleration * deltaTime;
       if (keys['ArrowDown'] || keys['s']) car.speed -= acceleration * deltaTime;
@@ -169,19 +167,25 @@ export default function RaceRoom({ roomId }) {
         if (car.speed > 0) car.speed = 0;
       }
 
-      if (keys['ArrowLeft'] || keys['a']) car.angle -= turnSpeed * deltaTime * (car.speed / 400);
-      if (keys['ArrowRight'] || keys['d']) car.angle += turnSpeed * deltaTime * (car.speed / 400);
+      const turnFactor = Math.max(Math.abs(car.speed) / 360, 0.25);
+      if (keys['ArrowLeft'] || keys['a']) car.angle -= turnSpeed * deltaTime * turnFactor;
+      if (keys['ArrowRight'] || keys['d']) car.angle += turnSpeed * deltaTime * turnFactor;
 
       car.x += Math.cos(car.angle) * car.speed * deltaTime;
       car.y += Math.sin(car.angle) * car.speed * deltaTime;
 
+      car.x = Math.max(20, Math.min(car.x, WORLD.width - 20));
+      car.y = Math.max(20, Math.min(car.y, WORLD.height - 20));
+
       const target = CHECKPOINTS[race.nextCheckpoint];
-      const dist = distance(car.x, car.y, target.x, target.y);
-      if (dist < CHECKPOINT_RADIUS) {
+      if (distance(car.x, car.y, target.x, target.y) < CHECKPOINT_RADIUS) {
+        race.score += POINTS_PER_CHECKPOINT;
         race.nextCheckpoint++;
+
         if (race.nextCheckpoint >= CHECKPOINTS.length) {
           race.nextCheckpoint = 0;
           race.laps++;
+          race.score += POINTS_PER_LAP;
         }
       }
 
@@ -193,61 +197,49 @@ export default function RaceRoom({ roomId }) {
       });
     }
 
-    function drawTrack() {
-      ctx.fillStyle = '#3a5a3a';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.beginPath();
-      ctx.ellipse(TRACK.centerX, TRACK.centerY, TRACK.outerRx, TRACK.outerRy, 0, 0, Math.PI * 2);
-      ctx.fillStyle = '#555';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(TRACK.centerX, TRACK.centerY, TRACK.innerRx, TRACK.innerRy, 0, 0, Math.PI * 2);
-      ctx.fillStyle = '#3a5a3a';
-      ctx.fill();
-    }
-
-    function drawCheckpoints() {
-      const race = raceRef.current;
-      CHECKPOINTS.forEach((cp, index) => {
-        ctx.beginPath();
-        ctx.arc(cp.x, cp.y, CHECKPOINT_RADIUS, 0, Math.PI * 2);
-        ctx.strokeStyle = index === race.nextCheckpoint ? 'yellow' : 'rgba(255,255,255,0.3)';
-        ctx.lineWidth = 3;
-        ctx.stroke();
-      });
-    }
-
-    function drawCarAt(x, y, angle, color, name) {
+    function drawCarAt(x, y, angle, color, name, score) {
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(angle);
       ctx.fillStyle = color;
-      ctx.fillRect(-15, -10, 30, 20);
+      ctx.fillRect(-16, -11, 32, 22);
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.fillRect(-10, -8, 14, 16);
       ctx.restore();
 
-      if (name) {
-        ctx.fillStyle = 'white';
-        ctx.font = '12px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(name, x, y - 20);
-      }
+      ctx.font = 'bold 13px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(x - 42, y - 48, 84, 34);
+      ctx.fillStyle = '#ffd700';
+      ctx.fillText(`${score} puan`, x, y - 30);
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px sans-serif';
+      ctx.fillText(name, x, y - 14);
     }
 
     function draw() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      drawTrack();
-      drawCheckpoints();
+      const car = carRef.current;
+      const { width, height } = viewSizeRef.current;
+      const camera = clampCamera(car.x - width / 2, car.y - height / 2, width, height);
+
+      ctx.clearRect(0, 0, width, height);
+      ctx.save();
+      ctx.translate(-camera.x, -camera.y);
+
+      drawTrack(ctx);
+      drawCheckpoints(ctx, raceRef.current.nextCheckpoint);
 
       Object.values(othersRef.current).forEach((other) => {
-        drawCarAt(other.x, other.y, other.angle, other.color, other.name);
+        drawCarAt(other.x, other.y, other.angle, other.color, other.name, other.score ?? 0);
       });
 
-      const car = carRef.current;
-      drawCarAt(car.x, car.y, car.angle, playerColor, playerName);
+      drawCarAt(car.x, car.y, car.angle, playerColor, playerName, raceRef.current.score);
+      ctx.restore();
     }
 
     function loop(currentTime) {
-      const deltaTime = (currentTime - lastTime) / 1000;
+      const deltaTime = Math.min((currentTime - lastTime) / 1000, 0.05);
       lastTime = currentTime;
 
       update(deltaTime);
@@ -255,8 +247,10 @@ export default function RaceRoom({ roomId }) {
 
       if (currentTime - lastUiUpdate > 100) {
         lastUiUpdate = currentTime;
-        setDisplayLaps(raceRef.current.laps);
-        setDisplayTime((currentTime - raceRef.current.startTime) / 1000);
+        const race = raceRef.current;
+        setDisplayScore(race.score);
+        setDisplayLaps(race.laps);
+        setDisplayTime((currentTime - race.startTime) / 1000);
       }
 
       if (connectedRef.current && currentTime - lastNetworkSend > 66) {
@@ -272,6 +266,7 @@ export default function RaceRoom({ roomId }) {
             angle: car.angle,
             color: playerColor,
             name: playerName,
+            score: raceRef.current.score,
           },
         });
       }
@@ -284,6 +279,7 @@ export default function RaceRoom({ roomId }) {
     return () => {
       connectedRef.current = false;
       cancelAnimationFrame(animationId);
+      window.removeEventListener('resize', resizeCanvas);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       channel.untrack();
@@ -293,23 +289,33 @@ export default function RaceRoom({ roomId }) {
 
   return (
     <div style={{ backgroundColor: 'black', minHeight: '100vh' }}>
-      <div style={{ color: 'white', padding: '1rem', display: 'flex', gap: '2rem', flexWrap: 'wrap' }}>
-        <h1>Комната: {roomId}</h1>
-        <div>Круги: {displayLaps}</div>
-        <div>Время: {displayTime.toFixed(1)}с</div>
-        <div>Игроков: {playerCount}</div>
+      <div
+        style={{
+          color: 'white',
+          padding: '1rem',
+          display: 'flex',
+          gap: '1.5rem',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+        }}
+      >
+        <h1 style={{ margin: 0 }}>Комната: {roomId}</h1>
+        <div>Puan: {displayScore}</div>
+        <div>Tur: {displayLaps}</div>
+        <div>Süre: {displayTime.toFixed(1)}s</div>
+        <div>Oyuncu: {playerCount}</div>
         <div style={{ opacity: 0.7 }}>
           {connectionStatus === 'connected' && '🟢 Online'}
-          {connectionStatus === 'connecting' && '🟡 Подключение...'}
-          {connectionStatus === 'error' && '🔴 Ошибка подключения'}
+          {connectionStatus === 'connecting' && '🟡 Bağlanıyor...'}
+          {connectionStatus === 'error' && '🔴 Bağlantı hatası'}
         </div>
       </div>
-      <canvas
-        ref={canvasRef}
-        width={800}
-        height={600}
-        style={{ display: 'block', margin: '0 auto', backgroundColor: '#333' }}
-      />
+      <div ref={containerRef} style={{ width: '100%', maxWidth: '1280px', margin: '0 auto' }}>
+        <canvas
+          ref={canvasRef}
+          style={{ display: 'block', width: '100%', backgroundColor: '#1a1a1a', borderRadius: '8px' }}
+        />
+      </div>
     </div>
   );
 }
