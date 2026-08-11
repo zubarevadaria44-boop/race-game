@@ -8,11 +8,11 @@ import {
   SPAWN,
   DRAGON_SPAWN,
   POWERUPS,
-  BOOST_PADS,
   clampCamera,
   drawArena,
   drawPowerups,
   drawMinimap,
+  drawHealthBar,
   distance,
   isInLava,
 } from '@/lib/arena';
@@ -23,20 +23,27 @@ import {
   FIRE_HIT_RADIUS,
   PICKUP_RESPAWN,
   MAX_ROCKETS,
-  MAX_LIVES,
+  MAX_PLAYER_HP,
   MAX_SHIELDS,
-  BOOST_DURATION,
-  BOOST_MULTIPLIER,
+  ROCKET_PLAYER_DAMAGE,
+  FIRE_DAMAGE,
+  DRAGON_BODY_DAMAGE,
+  DRAGON_BODY_RADIUS,
   INVINCIBLE_MS,
   RESPAWN_MS,
   DRAGON_MAX_HP,
   ROCKET_DAMAGE,
   DRAGON_BREATH_INTERVAL,
+  DRAGON_BREATH_ENRAGED,
   DRAGON_RESPAWN_MS,
+  DRAGON_SPEED,
+  DRAGON_ENRAGED_SPEED,
   resolveCarCollision,
   isStunned,
   isInvincible,
   applyStun,
+  applyDamage,
+  hpPercent,
   createRocket,
   createSpreadRockets,
   createFireball,
@@ -61,7 +68,8 @@ function upsertOther(othersRef, data) {
     name: data.name,
     kills: data.kills ?? e?.kills ?? 0,
     dragonDamage: data.dragonDamage ?? e?.dragonDamage ?? 0,
-    lives: data.lives ?? e?.lives ?? MAX_LIVES,
+    hp: data.hp ?? e?.hp ?? MAX_PLAYER_HP,
+    maxHp: MAX_PLAYER_HP,
     shields: data.shields ?? e?.shields ?? 0,
     stunnedUntil: data.stunnedUntil ?? e?.stunnedUntil ?? 0,
     dead: data.dead ?? false,
@@ -97,11 +105,12 @@ export default function RaceRoom() {
   const pickupStateRef = useRef({});
   const rocketsAmmoRef = useRef(1);
   const spacePressedRef = useRef(false);
+  const dragonTouchCooldownRef = useRef(0);
 
   const [displayKills, setDisplayKills] = useState(0);
   const [displayDragonDmg, setDisplayDragonDmg] = useState(0);
-  const [displayLives, setDisplayLives] = useState(MAX_LIVES);
-  const [displayDragonHp, setDisplayDragonHp] = useState(DRAGON_MAX_HP);
+  const [displayHp, setDisplayHp] = useState(100);
+  const [displayDragonHp, setDisplayDragonHp] = useState(100);
   const [displayRockets, setDisplayRockets] = useState(1);
   const [playerCount, setPlayerCount] = useState(1);
   const [connectionStatus, setConnectionStatus] = useState('connecting');
@@ -114,6 +123,7 @@ export default function RaceRoom() {
     projectilesRef.current = [];
     explosionsRef.current = [];
     rocketsAmmoRef.current = 1;
+    dragonTouchCooldownRef.current = 0;
     pickupStateRef.current = Object.fromEntries(POWERUPS.map((p) => [p.id, { active: true, respawnAt: 0 }]));
     victoryMsgRef.current = '';
 
@@ -139,39 +149,24 @@ export default function RaceRoom() {
     }
 
     function broadcast(event, payload) {
-      if (connectedRef.current) {
-        channel.send({ type: 'broadcast', event, payload });
-      }
+      if (connectedRef.current) channel.send({ type: 'broadcast', event, payload });
     }
 
-    function damagePlayer(targetId, x, y, now, killerId) {
+    function killPlayer(entity, now, killerId) {
+      entity.dead = true;
+      entity.respawnAt = now + RESPAWN_MS;
+      entity.hp = 0;
+      if (killerId === playerIdRef.current) playerRef.current.kills += 1;
+    }
+
+    function damagePlayer(targetId, amount, x, y, now, killerId) {
       const isLocal = targetId === playerIdRef.current;
       const entity = isLocal ? playerRef.current : othersRef.current[targetId];
       if (!entity || entity.dead || isInvincible(entity, now)) return;
 
       explosionsRef.current.push(createExplosion(x, y));
-
-      if (entity.shields > 0) {
-        entity.shields -= 1;
-        applyStun(entity, now, 0.7);
-        entity.invincibleUntil = now + INVINCIBLE_MS;
-        return;
-      }
-
-      entity.lives -= 1;
-      applyStun(entity, now);
-
-      if (entity.lives <= 0) {
-        entity.dead = true;
-        entity.respawnAt = now + RESPAWN_MS;
-        if (killerId === playerIdRef.current) {
-          playerRef.current.kills += 1;
-        }
-      } else if (isLocal) {
-        entity.invincibleUntil = now + INVINCIBLE_MS;
-      }
-
-      if (!isLocal) entity.invincibleUntil = now + INVINCIBLE_MS;
+      const died = applyDamage(entity, amount, now);
+      if (died) killPlayer(entity, now, killerId);
     }
 
     function damageDragon(amount) {
@@ -179,6 +174,7 @@ export default function RaceRoom() {
       if (!dragon.alive) return;
 
       dragon.hp = Math.max(0, dragon.hp - amount);
+      dragon.enraged = dragon.hp / dragon.maxHp < 0.3;
       playerRef.current.dragonDamage += amount;
       broadcast('dragon-hit', { hp: dragon.hp, damage: amount, by: playerIdRef.current });
 
@@ -239,14 +235,13 @@ export default function RaceRoom() {
     });
 
     channel.on('broadcast', { event: 'hit' }, ({ payload: data }) => {
-      damagePlayer(data.targetId, data.x, data.y, performance.now(), data.killerId);
+      damagePlayer(data.targetId, data.amount, data.x, data.y, performance.now(), data.killerId);
     });
 
     channel.on('broadcast', { event: 'dragon-hit' }, ({ payload: data }) => {
       const dragon = dragonRef.current;
-      if (data.by !== playerIdRef.current) {
-        dragon.hp = Math.min(dragon.hp, data.hp);
-      }
+      if (data.by !== playerIdRef.current) dragon.hp = Math.min(dragon.hp, data.hp);
+      dragon.enraged = dragon.hp / dragon.maxHp < 0.3;
       if (dragon.hp <= 0 && dragon.alive) {
         dragon.alive = false;
         dragon.defeatedAt = performance.now();
@@ -255,9 +250,7 @@ export default function RaceRoom() {
     });
 
     channel.on('broadcast', { event: 'dragon-dead' }, ({ payload: data }) => {
-      if (data.by !== playerName) {
-        victoryMsgRef.current = `🎉 ${data.by} led the final blow! 🎉`;
-      }
+      if (data.by !== playerName) victoryMsgRef.current = `🎉 ${data.by} led the final blow! 🎉`;
     });
 
     channel.on('broadcast', { event: 'pickup' }, ({ payload: data }) => {
@@ -299,25 +292,62 @@ export default function RaceRoom() {
         return;
       }
 
+      dragon.enraged = dragon.hp / dragon.maxHp < 0.3;
+      const speed = dragon.enraged ? DRAGON_ENRAGED_SPEED : DRAGON_SPEED;
+      const breathInterval = dragon.enraged ? DRAGON_BREATH_ENRAGED : DRAGON_BREATH_INTERVAL;
+
       const target = getNearestTarget(dragon.x, dragon.y, allPlayers());
       if (target) {
-        const targetAngle = Math.atan2(target.y - dragon.y, target.x - dragon.x);
+        const dx = target.x - dragon.x;
+        const dy = target.y - dragon.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        const targetAngle = Math.atan2(dy, dx);
+
         let diff = targetAngle - dragon.angle;
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;
-        dragon.angle += diff * Math.min(deltaTime * 2.5, 1);
+        dragon.angle += diff * Math.min(deltaTime * 3, 1);
+
+        if (dist > 200) {
+          dragon.x += (dx / dist) * speed * deltaTime;
+          dragon.y += (dy / dist) * speed * deltaTime;
+        } else if (dist < 140) {
+          dragon.x -= (dx / dist) * speed * 0.6 * deltaTime;
+          dragon.y -= (dy / dist) * speed * 0.6 * deltaTime;
+        }
+
+        dragon.x = Math.max(150, Math.min(dragon.x, WORLD.width - 150));
+        dragon.y = Math.max(150, Math.min(dragon.y, WORLD.height - 150));
       }
 
       dragon.breathing = false;
-      if (now - dragon.lastBreath > DRAGON_BREATH_INTERVAL) {
+      if (now - dragon.lastBreath > breathInterval) {
         dragon.lastBreath = now;
         dragon.breathing = true;
+        const spread = dragon.enraged ? 3 : 2;
+        for (let i = -spread; i <= spread; i++) {
+          const a = dragon.angle + i * 0.11;
+          projectilesRef.current.push(
+            createFireball(
+              dragon.x + Math.cos(a) * 140,
+              dragon.y + Math.sin(a) * 140,
+              a,
+            ),
+          );
+        }
+      }
+    }
 
-        for (let i = -2; i <= 2; i++) {
-          const a = dragon.angle + i * 0.12;
-          const fx = dragon.x + Math.cos(a) * 140;
-          const fy = dragon.y + Math.sin(a) * 140;
-          projectilesRef.current.push(createFireball(fx, fy, a));
+    function checkDragonBody(now) {
+      const dragon = dragonRef.current;
+      if (!dragon.alive) return;
+
+      const p = playerRef.current;
+      if (!p.dead && !isInvincible(p, now) && distance(p.x, p.y, dragon.x, dragon.y) < DRAGON_BODY_RADIUS) {
+        if (now - dragonTouchCooldownRef.current > 800) {
+          dragonTouchCooldownRef.current = now;
+          const died = applyDamage(p, DRAGON_BODY_DAMAGE, now);
+          if (died) killPlayer(p, now, null);
         }
       }
     }
@@ -342,10 +372,6 @@ export default function RaceRoom() {
         state.respawnAt = now + PICKUP_RESPAWN * 1000;
         broadcast('pickup', { pickupId: pickup.id, respawnAt: state.respawnAt });
       });
-
-      BOOST_PADS.forEach((pad) => {
-        if (distance(p.x, p.y, pad.x, pad.y) < 44) p.boostedUntil = now + BOOST_DURATION * 1000;
-      });
     }
 
     function updateProjectiles(now, deltaTime) {
@@ -368,8 +394,14 @@ export default function RaceRoom() {
             for (const [id, other] of Object.entries(othersRef.current)) {
               if (other.dead) continue;
               if (distance(proj.x, proj.y, other.x, other.y) < ROCKET_HIT_RADIUS) {
-                damagePlayer(id, proj.x, proj.y, now, playerIdRef.current);
-                broadcast('hit', { targetId: id, x: proj.x, y: proj.y, killerId: playerIdRef.current });
+                damagePlayer(id, ROCKET_PLAYER_DAMAGE, proj.x, proj.y, now, playerIdRef.current);
+                broadcast('hit', {
+                  targetId: id,
+                  amount: ROCKET_PLAYER_DAMAGE,
+                  x: proj.x,
+                  y: proj.y,
+                  killerId: playerIdRef.current,
+                });
                 return false;
               }
             }
@@ -381,22 +413,17 @@ export default function RaceRoom() {
             !isInvincible(p, now) &&
             distance(proj.x, proj.y, p.x, p.y) < ROCKET_HIT_RADIUS
           ) {
-            damagePlayer(playerIdRef.current, proj.x, proj.y, now, proj.ownerId);
+            damagePlayer(playerIdRef.current, ROCKET_PLAYER_DAMAGE, proj.x, proj.y, now, proj.ownerId);
             return false;
           }
         }
 
         if (proj.kind === 'fire') {
           if (!p.dead && !isInvincible(p, now) && distance(proj.x, proj.y, p.x, p.y) < FIRE_HIT_RADIUS) {
-            damagePlayer(playerIdRef.current, proj.x, proj.y, now, null);
+            const died = applyDamage(p, FIRE_DAMAGE, now);
             explosionsRef.current.push(createExplosion(proj.x, proj.y));
+            if (died) killPlayer(p, now, null);
             return false;
-          }
-          for (const [id, other] of Object.entries(othersRef.current)) {
-            if (!other.dead && distance(proj.x, proj.y, other.x, other.y) < FIRE_HIT_RADIUS) {
-              explosionsRef.current.push(createExplosion(proj.x, proj.y));
-              return false;
-            }
           }
         }
 
@@ -407,6 +434,7 @@ export default function RaceRoom() {
     function update(deltaTime) {
       const p = playerRef.current;
       const now = performance.now();
+      const dragon = dragonRef.current;
 
       if (p.dead) {
         if (now >= p.respawnAt) respawnPlayer(p, SPAWN);
@@ -417,15 +445,14 @@ export default function RaceRoom() {
 
       collectPickups(now);
       updateDragon(now, deltaTime);
+      checkDragonBody(now);
 
-      const inLava = isInLava(p.x, p.y);
+      const inLava = isInLava(p.x, p.y, dragon.x, dragon.y);
       const stunned = isStunned(p, now);
-      const boosted = p.boostedUntil && now < p.boostedUntil;
       const acceleration = inLava ? 180 : 320;
       const friction = inLava ? 130 : 100;
       const turnSpeed = inLava ? 2.2 : 3.4;
-      let maxSpeed = inLava ? 140 : 400;
-      if (boosted) maxSpeed *= BOOST_MULTIPLIER;
+      const maxSpeed = inLava ? 140 : 400;
 
       if (!stunned) {
         const keys = keysRef.current;
@@ -441,10 +468,14 @@ export default function RaceRoom() {
       if (p.speed > maxSpeed) p.speed = maxSpeed;
       if (p.speed < -maxSpeed / 2) p.speed = -maxSpeed / 2;
 
-      const throttle = keysRef.current['ArrowUp'] || keysRef.current['w'] || keysRef.current['ArrowDown'] || keysRef.current['s'];
+      const throttle =
+        keysRef.current['ArrowUp'] ||
+        keysRef.current['w'] ||
+        keysRef.current['ArrowDown'] ||
+        keysRef.current['s'];
       if (!throttle) {
-        if (p.speed > 0) { p.speed = Math.max(0, p.speed - friction * deltaTime); }
-        else if (p.speed < 0) { p.speed = Math.min(0, p.speed + friction * deltaTime); }
+        if (p.speed > 0) p.speed = Math.max(0, p.speed - friction * deltaTime);
+        else if (p.speed < 0) p.speed = Math.min(0, p.speed + friction * deltaTime);
       }
 
       p.x += Math.cos(p.angle) * p.speed * deltaTime;
@@ -471,35 +502,44 @@ export default function RaceRoom() {
     function drawPlayer(x, y, angle, color, name, pl, now) {
       const stunned = isStunned(pl, now);
       const inv = isInvincible(pl, now);
-      const boosted = pl.boostedUntil && now < pl.boostedUntil;
 
       ctx.save();
       ctx.translate(x, y);
       ctx.rotate(angle);
       if (pl.dead) ctx.globalAlpha = 0.3;
-      if (inv && !pl.dead) { ctx.shadowColor = '#fff'; ctx.shadowBlur = 14; }
-      if (boosted) { ctx.shadowColor = '#00d4ff'; ctx.shadowBlur = 16; }
+      if (inv && !pl.dead) {
+        ctx.shadowColor = '#fff';
+        ctx.shadowBlur = 14;
+      }
       ctx.fillStyle = color;
       ctx.fillRect(-16, -11, 32, 22);
       ctx.fillStyle = 'rgba(0,0,0,0.35)';
       ctx.fillRect(-10, -8, 14, 16);
       ctx.restore();
 
-      ctx.textAlign = 'center';
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillRect(x - 55, y - 58, 110, pl.dead ? 28 : 50);
       if (!pl.dead) {
-        ctx.fillStyle = '#fff';
+        const hpColor = pl.hp / pl.maxHp > 0.3 ? '#44cc66' : '#ff4444';
+        drawHealthBar(ctx, x, y, pl.hp, pl.maxHp, name, hpColor);
+        if (pl.shields > 0) {
+          ctx.fillStyle = '#88bbff';
+          ctx.font = '11px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('🛡️', x, y - 58);
+        }
+        if (stunned) {
+          ctx.fillStyle = '#ff6b6b';
+          ctx.font = '11px sans-serif';
+          ctx.fillText('💫 Stunned', x, y - 38);
+        }
+        if (pl.kills > 0) {
+          ctx.fillStyle = '#ffd700';
+          ctx.fillText(`⚔️ ${pl.kills}`, x, y + 8);
+        }
+      } else {
+        ctx.fillStyle = '#888';
         ctx.font = '12px sans-serif';
-        ctx.fillText('❤️'.repeat(pl.lives) + '🖤'.repeat(MAX_LIVES - pl.lives), x, y - 44);
-        if (pl.shields > 0) ctx.fillText('🛡️', x, y - 28);
-      }
-      ctx.fillStyle = pl.dead ? '#888' : stunned ? '#ff6b6b' : '#fff';
-      ctx.font = '12px sans-serif';
-      ctx.fillText(pl.dead ? '💀 Respawning' : stunned ? '💫 Hit!' : name, x, y - (pl.dead ? 38 : 12));
-      if (!pl.dead && pl.kills > 0) {
-        ctx.fillStyle = '#ffd700';
-        ctx.fillText(`⚔️ ${pl.kills}`, x, y + 4);
+        ctx.textAlign = 'center';
+        ctx.fillText('💀 Respawning', x, y - 30);
       }
     }
 
@@ -510,11 +550,11 @@ export default function RaceRoom() {
       if (proj.kind === 'fire') {
         ctx.fillStyle = '#ff6600';
         ctx.beginPath();
-        ctx.arc(0, 0, 9, 0, Math.PI * 2);
+        ctx.arc(0, 0, 10, 0, Math.PI * 2);
         ctx.fill();
-        ctx.fillStyle = '#ffcc00';
+        ctx.fillStyle = '#ffee00';
         ctx.beginPath();
-        ctx.arc(3, 0, 5, 0, Math.PI * 2);
+        ctx.arc(4, 0, 5, 0, Math.PI * 2);
         ctx.fill();
       } else {
         ctx.fillStyle = '#ff4500';
@@ -559,13 +599,20 @@ export default function RaceRoom() {
       drawMinimap(ctx, camera, { width, height }, p, othersRef.current, playerColor, dragon);
 
       ctx.fillStyle = 'rgba(0,0,0,0.65)';
-      ctx.fillRect(10, 10, 230, 72);
+      ctx.fillRect(10, 10, 240, 72);
       ctx.fillStyle = '#fff';
       ctx.font = '12px sans-serif';
       ctx.textAlign = 'left';
       ctx.fillText(`🚀 Rockets: ${rocketsAmmoRef.current}/${MAX_ROCKETS}${p.spreadShot ? ' 💥' : ''}`, 20, 30);
-      ctx.fillText('Space — attack dragon / players', 20, 48);
-      ctx.fillText(`🐉 Dragon DMG: ${p.dragonDamage}`, 20, 66);
+      ctx.fillText('Space — fire at dragon / players', 20, 48);
+      ctx.fillText(`🔥 Dragon DMG: ${p.dragonDamage}`, 20, 66);
+
+      if (dragon.enraged && dragon.alive) {
+        ctx.fillStyle = 'rgba(255,40,0,0.75)';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('⚠️ DRAGON ENRAGED', width / 2, 28);
+      }
 
       if (victoryMsgRef.current) {
         ctx.fillStyle = 'rgba(0,0,0,0.7)';
@@ -574,6 +621,15 @@ export default function RaceRoom() {
         ctx.font = 'bold 26px sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText(victoryMsgRef.current, width / 2, height / 2 + 10);
+      }
+
+      if (p.dead) {
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(width / 2 - 130, height - 56, 260, 40);
+        ctx.fillStyle = '#ff8888';
+        ctx.font = '15px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Respawning...', width / 2, height - 30);
       }
     }
 
@@ -589,8 +645,8 @@ export default function RaceRoom() {
         const dr = dragonRef.current;
         setDisplayKills(pl.kills);
         setDisplayDragonDmg(pl.dragonDamage);
-        setDisplayLives(pl.lives);
-        setDisplayDragonHp(Math.max(0, Math.ceil(dr.hp)));
+        setDisplayHp(hpPercent(pl.hp, pl.maxHp));
+        setDisplayDragonHp(hpPercent(dr.hp, dr.maxHp));
         setDisplayRockets(rocketsAmmoRef.current);
       }
 
@@ -609,7 +665,7 @@ export default function RaceRoom() {
             name: playerName,
             kills: pl.kills,
             dragonDamage: pl.dragonDamage,
-            lives: pl.lives,
+            hp: pl.hp,
             shields: pl.shields,
             stunnedUntil: pl.stunnedUntil || 0,
             dead: pl.dead,
@@ -635,12 +691,21 @@ export default function RaceRoom() {
 
   return (
     <div style={{ backgroundColor: '#0a0808', minHeight: '100vh' }}>
-      <div style={{ color: 'white', padding: '1rem', display: 'flex', gap: '1.2rem', flexWrap: 'wrap', alignItems: 'center' }}>
+      <div
+        style={{
+          color: 'white',
+          padding: '1rem',
+          display: 'flex',
+          gap: '1.2rem',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+        }}
+      >
         <h1 style={{ margin: 0 }}>🐉 Dragon Battle</h1>
-        <div>🐉 HP: {displayDragonHp}</div>
+        <div>🐉 {displayDragonHp}%</div>
+        <div>❤️ HP {displayHp}%</div>
         <div>⚔️ Kills: {displayKills}</div>
-        <div>🔥 Dragon DMG: {displayDragonDmg}</div>
-        <div>❤️ {displayLives}/{MAX_LIVES}</div>
+        <div>🔥 Dmg: {displayDragonDmg}</div>
         <div>🚀 {displayRockets}/{MAX_ROCKETS}</div>
         <div>Players: {playerCount}</div>
         <div style={{ opacity: 0.7 }}>
@@ -650,7 +715,10 @@ export default function RaceRoom() {
         </div>
       </div>
       <div ref={containerRef} style={{ width: '100%', maxWidth: '1280px', margin: '0 auto' }}>
-        <canvas ref={canvasRef} style={{ display: 'block', width: '100%', backgroundColor: '#1a1010', borderRadius: '8px' }} />
+        <canvas
+          ref={canvasRef}
+          style={{ display: 'block', width: '100%', backgroundColor: '#1a1010', borderRadius: '8px' }}
+        />
       </div>
     </div>
   );
